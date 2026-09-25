@@ -119,8 +119,8 @@ if [ "$ADD_AIROHA_NPU" = "true" ]; then
 fi
 # --- theme_design ---
 if [ "$ADD_theme_design" = "true" ]; then
-  clone https://github.com/kenzok78/luci-design-bundle  "$PKG_DIR/luci-app-design-config" master
-  clone https://github.com/kenzok78/luci-theme-design  "$PKG_DIR/luci-theme-design" master
+  sed -i '$a src-git kenzo https://github.com/kenzok8/openwrt-packages' feeds.conf.default
+  sed -i '$a src-git small https://github.com/kenzok8/small' feeds.conf.default
 fi
 # --- passwall ---
 if [ "$ADD_PASSWALL" = "true" ]; then
