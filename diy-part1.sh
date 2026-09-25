@@ -22,7 +22,7 @@ mkdir -p "$PKG_DIR"
 # 见 files/sbin/tempinfo（概览页「温度」行：CPU / WiFi / PON 温度 + 光功率）
 # ---------------------------------------------------------
 ADD_AIROHA_NPU=true    # luci-app-airoha-npu：Airoha SoC 状态页（NPU/CPU/Frame Engine/PPE）
-
+ADD_theme_design=true  # luci-theme-design 主题
 ADD_PASSWALL=false     # luci-app-passwall（含依赖源）
 ADD_OPENCLASH=false    # luci-app-openclash ⚠ 依赖 Ruby/Rust，编译极慢
 ADD_MOSDNS=false       # luci-app-mosdns + v2ray-geodata
@@ -117,6 +117,9 @@ if [ "$ADD_AIROHA_NPU" = "true" ]; then
   fi
   echo "   po/zh_Hans: $(ls -1 "$PODIR/zh_Hans/" 2>/dev/null | tr '\n' ' ')"
 fi
+# --- theme_design ---
+if [ "$ADD_theme_design" = "true" ]; then
+  clone https://github.com/kenzok78/luci-theme-design  "$PKG_DIR/luci-theme-design" master
 
 # --- passwall ---
 if [ "$ADD_PASSWALL" = "true" ]; then
