@@ -119,6 +119,7 @@ if [ "$ADD_AIROHA_NPU" = "true" ]; then
 fi
 # --- theme_design ---
 if [ "$ADD_theme_design" = "true" ]; then
+  clone https://github.com/kenzok78/luci-design-bundle  "$PKG_DIR/luci-app-design-config" master
   clone https://github.com/kenzok78/luci-theme-design  "$PKG_DIR/luci-theme-design" master
 
 # --- passwall ---
