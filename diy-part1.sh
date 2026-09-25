@@ -121,7 +121,7 @@ fi
 if [ "$ADD_theme_design" = "true" ]; then
   clone https://github.com/kenzok78/luci-design-bundle  "$PKG_DIR/luci-app-design-config" master
   clone https://github.com/kenzok78/luci-theme-design  "$PKG_DIR/luci-theme-design" master
-
+fi
 # --- passwall ---
 if [ "$ADD_PASSWALL" = "true" ]; then
   clone https://github.com/xiaorouji/openwrt-passwall-packages "$PKG_DIR/openwrt-passwall-packages" main
