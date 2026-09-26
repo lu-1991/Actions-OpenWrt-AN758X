@@ -26,10 +26,46 @@ ADD_theme_design=true  # luci-theme-design 主题
 ADD_PASSWALL=false     # luci-app-passwall（含依赖源）
 ADD_OPENCLASH=false    # luci-app-openclash ⚠ 依赖 Ruby/Rust，编译极慢
 ADD_MOSDNS=false       # luci-app-mosdns + v2ray-geodata
-ADD_LUCKY=true        # luci-app-lucky（DDNS + socat）
+ADD_LUCKY=false        # luci-app-lucky（DDNS + socat）
 ADD_TAILSCALE=false    # luci-app-tailscale
 ADD_OPENLIST=false     # luci-app-openlist2（alist/openlist 挂载）
 ADD_SMARTDNS=false     # luci-app-smartdns
+
+# ---------------------------------------------------------
+# 通用函数
+# ---------------------------------------------------------
+TMP_CLONE=""
+
+clone_repo() {  # clone_repo <url> [branch]  → 落地到 $TMP_CLONE
+  local url="$1" br="$2" args=(--depth 1)
+  TMP_CLONE="$(mktemp -d)"
+  [ -n "$br" ] && args+=(-b "$br")
+  if ! git clone "${args[@]}" "$url" "$TMP_CLONE" 2>&1 | tail -3; then
+    echo "::error::clone 失败: $url"
+    rm -rf "$TMP_CLONE"; TMP_CLONE=""; return 1
+  fi
+}
+
+take_pkg() {  # take_pkg <子目录相对路径|.>  → 拷进 $PKG_DIR/<目录名>
+  local sub="$1" src name
+  if [ "$sub" = "." ]; then
+    name="$(basename "$(git -C "$TMP_CLONE" remote get-url origin 2>/dev/null)" .git)"
+    src="$TMP_CLONE"
+  else
+    name="$(basename "$sub")"
+    src="$TMP_CLONE/$sub"
+  fi
+  if [ ! -f "$src/Makefile" ]; then
+    echo "::error::$sub/Makefile 不存在，仓库结构可能变了"
+    find "$TMP_CLONE" -maxdepth 3 -name Makefile
+    return 1
+  fi
+  rm -rf "$PKG_DIR/$name"
+  cp -r "$src" "$PKG_DIR/$name"
+  echo "✅ $name"
+}
+
+cleanup_tmp() { rm -rf "$TMP_CLONE"; TMP_CLONE=""; }
 
 # ---------------------------------------------------------
 # 本地包：CI 仓库自带的包（不在任何 feed 里），拷进 package/custom
@@ -55,24 +91,8 @@ if [ -d "$LOCAL_PKG_DIR" ]; then
     -exec chmod +x {} \; 2>/dev/null
 fi
 
-clone() {  # clone <url> <dir> [branch]
-  local url="$1" dir="$2" br="$3"
-  [ -d "$dir" ] && { echo "已存在，跳过: $dir"; return 0; }
-  echo "--- git clone $url -> $dir ---"
-  if [ -n "$br" ]; then
-    git clone --depth 1 -b "$br" "$url" "$dir" 2>&1 | tail -3
-  else
-    git clone --depth 1 "$url" "$dir" 2>&1 | tail -3
-  fi
-  if [ -d "$dir" ]; then
-    echo "✅ 克隆成功: $dir"
-    return 0
-  fi
-  echo "::error::克隆失败: $url"
-  return 1
-}
-
-# --- Airoha SoC 状态页（NPU 卸载 / CPU 频率 / Frame Engine / PPE 流表）---
+# =========================================================
+# Airoha SoC 状态页（NPU 卸载 / CPU 频率 / Frame Engine / PPE 流表）
 # 包名由目录名决定（luci.mk: PKG_NAME ?= $(notdir ${CURDIR})），
 # 目录必须是 luci-app-airoha-npu，否则 config 里的符号对不上。
 #
@@ -80,13 +100,13 @@ clone() {  # clone <url> <dir> [branch]
 #   - 自带 po/zh_Hans 完整中文翻译（48 条）
 #   - 无 rchen14b 那种「根目录 + 同名子目录」重复结构，feed 索引不会中断
 #   - 修了 luci.mk 的 include 路径、加了独立 CPU 温度与 PLL 备用频率
+# =========================================================
 if [ "$ADD_AIROHA_NPU" = "true" ]; then
-  if ! clone https://github.com/luanmuc/luci-app-airoha-npu "$PKG_DIR/luci-app-airoha-npu" main; then
-    echo "::error::luci-app-airoha-npu 拉取失败，后续 defconfig 会静默剔除该包"
-    exit 1
-  fi
+  clone_repo https://github.com/luanmuc/luci-app-airoha-npu main \
+    && take_pkg . && cleanup_tmp \
+    || { echo "::error::luci-app-airoha-npu 拉取失败"; exit 1; }
 
-  # 包名校验：Makefile 必须存在，否则 buildroot 扫不到这个包
+  # 包名校验
   if [ ! -f "$PKG_DIR/luci-app-airoha-npu/Makefile" ]; then
     echo "::error::$PKG_DIR/luci-app-airoha-npu/Makefile 不存在，包无法被索引"
     exit 1
@@ -106,7 +126,6 @@ if [ "$ADD_AIROHA_NPU" = "true" ]; then
   # =========================================================
   PODIR="$PKG_DIR/luci-app-airoha-npu/po"
   if [ -f "$PODIR/zh_Hans/luci-app-airoha-npu.po" ]; then
-    # 确保 Language 头是 zh_Hans（上游头部缺该字段时 po2lmo 可能识别异常）
     grep -q '^"Language:' "$PODIR/zh_Hans/luci-app-airoha-npu.po" || \
       sed -i 's/^msgstr ""$/msgstr ""\n"Language: zh_Hans\\n"/' "$PODIR/zh_Hans/luci-app-airoha-npu.po"
     mv "$PODIR/zh_Hans/luci-app-airoha-npu.po" "$PODIR/zh_Hans/airoha-npu.po"
@@ -117,79 +136,133 @@ if [ "$ADD_AIROHA_NPU" = "true" ]; then
   fi
   echo "   po/zh_Hans: $(ls -1 "$PODIR/zh_Hans/" 2>/dev/null | tr '\n' ' ')"
 fi
-# --- theme_design ---
+
+# =========================================================
+# theme_design
+# 仓库结构：壳 + 同名子目录（根目录没有 Makefile，包在 luci-theme-design/）
+# =========================================================
 if [ "$ADD_theme_design" = "true" ]; then
-  clone https://github.com/lgs2007m/luci-theme-design "$PKG_DIR/luci-theme-design" openwrt-25.12
+  clone_repo https://github.com/lgs2007m/luci-theme-design openwrt-25.12 \
+    && take_pkg luci-theme-design && cleanup_tmp \
+    || { echo "::error::luci-theme-design 拉取失败"; exit 1; }
 fi
-# --- passwall ---
+
+# =========================================================
+# passwall（包在各自仓库根目录）
+# =========================================================
 if [ "$ADD_PASSWALL" = "true" ]; then
-  clone https://github.com/xiaorouji/openwrt-passwall-packages "$PKG_DIR/openwrt-passwall-packages" main
-  clone https://github.com/xiaorouji/openwrt-passwall "$PKG_DIR/openwrt-passwall" main
+  clone_repo https://github.com/xiaorouji/openwrt-passwall-packages main \
+    && take_pkg . && cleanup_tmp \
+    || { echo "::error::openwrt-passwall-packages 拉取失败"; exit 1; }
+  clone_repo https://github.com/xiaorouji/openwrt-passwall main \
+    && take_pkg . && cleanup_tmp \
+    || { echo "::error::openwrt-passwall 拉取失败"; exit 1; }
   rm -rf "$PKG_DIR/openwrt-passwall/luci-app-passwall2" 2>/dev/null
 fi
 
-# --- openclash ---
+# =========================================================
+# openclash（包在仓库的 luci-app-openclash 子目录）
+# =========================================================
 if [ "$ADD_OPENCLASH" = "true" ]; then
   echo "::warning::OpenClash 会触发 Ruby/Rust 编译，耗时极长"
-  clone https://github.com/vernesong/OpenClash "$PKG_DIR/OpenClash" master
-  mv "$PKG_DIR/OpenClash/luci-app-openclash" "$PKG_DIR/luci-app-openclash" 2>/dev/null
-  rm -rf "$PKG_DIR/OpenClash"
+  clone_repo https://github.com/vernesong/OpenClash master \
+    && take_pkg luci-app-openclash && cleanup_tmp \
+    || { echo "::error::OpenClash 拉取失败"; exit 1; }
 fi
 
-# --- mosdns ---
+# =========================================================
+# mosdns（两个独立仓库，包都在根目录）
+# =========================================================
 if [ "$ADD_MOSDNS" = "true" ]; then
-  clone https://github.com/sbwml/luci-app-mosdns "$PKG_DIR/luci-app-mosdns" v5
-  clone https://github.com/sbwml/v2ray-geodata "$PKG_DIR/v2ray-geodata" master
+  clone_repo https://github.com/sbwml/luci-app-mosdns v5 \
+    && take_pkg . && cleanup_tmp \
+    || { echo "::error::luci-app-mosdns 拉取失败"; exit 1; }
+  clone_repo https://github.com/sbwml/v2ray-geodata master \
+    && take_pkg . && cleanup_tmp \
+    || { echo "::error::v2ray-geodata 拉取失败"; exit 1; }
 fi
 
-# --- lucky ---
+# =========================================================
+# lucky（一仓库两包：luci-app-lucky + lucky，两个都要拿）
+# 仓库结构：壳 + 两个子目录，根目录没有 Makefile
+# =========================================================
 if [ "$ADD_LUCKY" = "true" ]; then
-  clone https://github.com/sirpdboy/luci-app-lucky "$PKG_DIR/luci-app-lucky" main
+  clone_repo https://github.com/sirpdboy/luci-app-lucky main \
+    && take_pkg luci-app-lucky \
+    && take_pkg lucky \
+    && cleanup_tmp \
+    || { echo "::error::luci-app-lucky 拉取失败"; exit 1; }
 fi
 
-# --- tailscale ---
+# =========================================================
+# tailscale（包在仓库根目录）
+# =========================================================
 if [ "$ADD_TAILSCALE" = "true" ]; then
-  clone https://github.com/asvow/luci-app-tailscale "$PKG_DIR/luci-app-tailscale" main
+  clone_repo https://github.com/asvow/luci-app-tailscale main \
+    && take_pkg . && cleanup_tmp \
+    || { echo "::error::luci-app-tailscale 拉取失败"; exit 1; }
 fi
 
-# --- openlist2 ---
+# =========================================================
+# openlist2（包在仓库根目录）
+# =========================================================
 if [ "$ADD_OPENLIST" = "true" ]; then
-  clone https://github.com/sbwml/luci-app-openlist2 "$PKG_DIR/luci-app-openlist2" main
+  clone_repo https://github.com/sbwml/luci-app-openlist2 main \
+    && take_pkg . && cleanup_tmp \
+    || { echo "::error::luci-app-openlist2 拉取失败"; exit 1; }
 fi
 
-# --- smartdns ---
+# =========================================================
+# smartdns（两个独立仓库，包都在根目录）
+# =========================================================
 if [ "$ADD_SMARTDNS" = "true" ]; then
-  clone https://github.com/pymumu/luci-app-smartdns "$PKG_DIR/luci-app-smartdns" master
-  clone https://github.com/pymumu/smartdns "$PKG_DIR/smartdns" master
+  clone_repo https://github.com/pymumu/luci-app-smartdns master \
+    && take_pkg . && cleanup_tmp \
+    || { echo "::error::luci-app-smartdns 拉取失败"; exit 1; }
+  clone_repo https://github.com/pymumu/smartdns master \
+    && take_pkg . && cleanup_tmp \
+    || { echo "::error::smartdns 拉取失败"; exit 1; }
 fi
 
 # ---------------------------------------------------------
-# 校验：默认开启的两个插件必须拉到，否则 defconfig 会静默剔除，
-#       编出来的固件缺少状态页还不易察觉
+# 兜底：清理重复嵌套目录
+# 只在「外层无 Makefile、内层有同名子目录且内层有 Makefile」时处理，
+# 也就是把壳里的真包提上来。正常走 take_pkg 不会触发。
 # ---------------------------------------------------------
-if [ "$ADD_AIROHA_NPU" = "true" ] && [ ! -d "$PKG_DIR/luci-app-airoha-npu" ]; then
-  echo "::error::luci-app-airoha-npu 未拉到，config 里的 =y 会被 defconfig 剔除"
-  exit 1
-fi
-
-# ---------------------------------------------------------
-# 清理重复嵌套目录
-# rchen14b/luci-app-airoha-npu 这个仓库有问题：包在根目录放了一份，
-# 又在同名子目录 luci-app-airoha-npu/ 里放了完整一份（含 Makefile）。
-# feeds 扫描会把两层都当成独立包，内层 dump 失败（报
-# "feeds/custom/luci-app-airoha-npu/luci-app-airoha-npu"）会中断整个
-# custom feed 的索引，导致 package/feeds/custom 压根不生成，
-# 所有包符号都不存在。
-# ---------------------------------------------------------
-echo "--- 检查重复嵌套目录 ---"
+echo "--- 检查重复嵌套目录（兜底） ---"
 for d in "$PKG_DIR"/*; do
   [ -d "$d" ] || continue
   n=$(basename "$d")
-  if [ -d "$d/$n" ] && [ -f "$d/$n/Makefile" ]; then
-    rm -rf "$d/$n"
-    echo "✅ 已移除重复嵌套目录: $n/$n"
+  if [ ! -f "$d/Makefile" ] && [ -f "$d/$n/Makefile" ]; then
+    mv "$d/$n" "$PKG_DIR/.tmp-$n"
+    rm -rf "$d"
+    mv "$PKG_DIR/.tmp-$n" "$PKG_DIR/$n"
+    echo "✅ 壳内真包已提上来: $n"
   fi
 done
+
+# ---------------------------------------------------------
+# 统一硬校验：任何已启用的插件，根目录必须有 Makefile。
+# 缺了就直接 exit 1，避免编出一个「看起来成功但少包」的固件。
+# ---------------------------------------------------------
+echo "--- 校验所有已启用插件都有 Makefile ---"
+check_pkg() {  # check_pkg <包名>
+  if [ ! -f "$PKG_DIR/$1/Makefile" ]; then
+    echo "::error::已启用但 $PKG_DIR/$1/Makefile 缺失，defconfig 会静默剔除，固件里不会有这个包"
+    echo "        目录内容："
+    ls -la "$PKG_DIR/$1" 2>/dev/null | head -20
+    exit 1
+  fi
+}
+[ "$ADD_AIROHA_NPU" = "true" ] && check_pkg luci-app-airoha-npu
+[ "$ADD_theme_design" = "true" ] && check_pkg luci-theme-design
+[ "$ADD_PASSWALL"   = "true" ] && check_pkg openwrt-passwall
+[ "$ADD_OPENCLASH"  = "true" ] && check_pkg luci-app-openclash
+[ "$ADD_MOSDNS"     = "true" ] && check_pkg luci-app-mosdns
+[ "$ADD_LUCKY"      = "true" ] && { check_pkg luci-app-lucky; check_pkg lucky; }
+[ "$ADD_TAILSCALE"  = "true" ] && check_pkg luci-app-tailscale
+[ "$ADD_OPENLIST"   = "true" ] && check_pkg luci-app-openlist2
+[ "$ADD_SMARTDNS"   = "true" ] && check_pkg luci-app-smartdns
 
 # ---------------------------------------------------------
 # 让新包进入索引
@@ -233,8 +306,6 @@ if [ -n "$(ls -A "$PKG_DIR" 2>/dev/null)" ]; then
 
   # =========================================================
   # 索引失败兜底 + 真实错误输出
-  # feeds 脚本只说"详情见 dump.txt"，那个文件在日志里看不到，
-  # 这里把它打印出来，并尝试回退方案：直接塞进已安装的 luci feed
   # =========================================================
   if [ ! -d package/feeds/custom ] || [ -z "$(ls -A package/feeds/custom 2>/dev/null)" ]; then
     echo "::warning::custom feed 索引未生成，打印真实错误："
