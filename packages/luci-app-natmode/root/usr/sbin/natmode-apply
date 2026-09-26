@@ -169,7 +169,71 @@ fw_reload() {
 }
 
 # ─────────────────────────────────────────────────────────────
-# apply：按 natmode.main.mode 真正落地
+# 生效模式反推：从「实际 UCI / nftables 状态」算出当前真实模式
+# ─────────────────────────────────────────────────────────────
+detect_effective() {
+	local fc rand
+	fc="$(uci -q get firewall.@defaults[0].fullcone 2>/dev/null)"
+	rand="$(nft_random_count)"
+
+	if [ "${fc:-0}" = "1" ]; then
+		echo "fullcone"
+	elif [ "${rand:-0}" != "0" ]; then
+		echo "symmetric"
+	else
+		echo "restricted"
+	fi
+}
+
+# ─────────────────────────────────────────────────────────────
+# ensure_module：全锥形时确保 nft_fullcone 已加载
+#
+# 防火墙页那个「启用 FullCone NAT」复选框的显示条件是
+#   L.hasSystemFeature('fullcone')
+# 而该判定（luci-base 的 rpcd ucode 插件）是
+#   access('/sys/module/nft_fullcone/refcnt')
+# 即模块没加载时选项根本不显示 —— 存在「没开 fullcone → 模块没加载 →
+# 选项不显示 → 没法在防火墙页打开」的鸡生蛋问题。
+# 这里主动 modprobe，保证该选项始终可见可用。
+# ─────────────────────────────────────────────────────────────
+ensure_module() {
+	if [ -d /sys/module/nft_fullcone ] || lsmod 2>/dev/null | grep -q nft_fullcone; then
+		return 0
+	fi
+	modprobe nft_fullcone >/dev/null 2>&1 && \
+		log "已加载 nft_fullcone 模块（使防火墙页 FullCone 选项可见）"
+}
+
+# ─────────────────────────────────────────────────────────────
+# sync：firewall → natmode 反向同步
+#
+# 网络 → 防火墙 → 常规设置 里的「启用 FullCone NAT」写的就是
+# firewall.@defaults[0].fullcone，与本插件同一个 UCI 键。
+# 在那边改动只会改 firewall，不会动 natmode.main.mode。
+# 这里把实际生效的模式写回 natmode，使两边始终一致。
+#
+# 返回：0=有同步发生，1=本来就一致
+# ─────────────────────────────────────────────────────────────
+do_sync() {
+	local mode effective
+	mode="$(get_mode)"
+	effective="$(detect_effective)"
+
+	if [ "$mode" = "$effective" ]; then
+		echo "$effective"
+		return 1
+	fi
+
+	uci set "$CONF_MODE"="$effective" 2>/dev/null && uci commit natmode
+	# 反向同步时若落到 fullcone 之外，也补一下模块可见性
+	ensure_module
+	log "反向同步（防火墙 → 本页）：$mode -> $effective"
+	echo "$effective"
+	return 0
+}
+
+# ─────────────────────────────────────────────────────────────
+# apply：按 natmode.main.mode 真正落地（natmode → firewall 方向）
 # ─────────────────────────────────────────────────────────────
 do_apply() {
 	local mode
@@ -179,6 +243,7 @@ do_apply() {
 		fullcone)
 			set_fullcone 1
 			nft_random_del
+			ensure_module
 			;;
 		restricted)
 			set_fullcone 0
@@ -199,7 +264,7 @@ do_apply() {
 		nft_random_add >/dev/null
 	fi
 
-	log "NAT 模式已应用: $mode"
+	log "NAT 模式已应用（本页 → 防火墙）：$mode"
 	echo "$mode"
 }
 
@@ -209,6 +274,10 @@ do_apply() {
 # ─────────────────────────────────────────────────────────────
 do_reapply() {
 	local mode fc
+
+	# 防火墙刚被改动/重载过 → 先把 firewall 侧的变化同步回本页
+	# （这样即使不打开 NAT 类型页，两边 UCI 也保持一致）
+	do_sync >/dev/null 2>&1
 	mode="$(get_mode)"
 	fc="$(uci -q get firewall.@defaults[0].fullcone 2>/dev/null)"
 
@@ -242,25 +311,23 @@ do_status() {
 	fi
 
 	# ── 反推实际生效模式 ──
-	if [ "$fc" = "1" ]; then
-		effective="fullcone"
-	elif [ "${rand:-0}" != "0" ]; then
-		effective="symmetric"
-	else
-		effective="restricted"
-	fi
+	effective="$(detect_effective)"
 
 	# ── 反向同步：firewall 页面被改过 → 写回 natmode.main.mode ──
-	# 防火墙页的「启用 FullCone NAT」写的就是 firewall.@defaults[0].fullcone，
-	# 与本插件同一个 UCI 键。在那边改动不会同步本页，这里把差异抹平。
 	if [ "$mode" != "$effective" ]; then
 		uci set "$CONF_MODE"="$effective" 2>/dev/null && uci commit natmode
 		synced=1
-		log "反向同步：$mode -> $effective（防火墙侧改动已同步到本页）"
+		log "反向同步（防火墙 → 本页）：$mode -> $effective"
 	fi
+
+	# 防火墙页「启用 FullCone NAT」复选框此刻的勾选状态
+	# （同一个 UCI 键，直接就是 firewall.@defaults[0].fullcone）
+	fw_mode="restricted"
+	[ "$fc" = "1" ] && fw_mode="fullcone"
 
 	echo "mode=$effective"
 	echo "effective=$effective"
+	echo "fw_mode=$fw_mode"
 	echo "fullcone=$fc"
 	echo "random_rules=${rand:-0}"
 	echo "srcnat_chains=${chains:-0}"
@@ -280,8 +347,13 @@ case "$1" in
 	apply)   do_apply ;;
 	reapply) do_reapply ;;
 	status)  do_status ;;
+	sync)    do_sync ;;
 	*)
-		echo "用法: natmode-apply [apply|reapply|status]"
+		echo "用法: natmode-apply [apply|reapply|status|sync]"
+		echo "  apply    本页 → 防火墙：按 natmode.main.mode 落地"
+		echo "  reapply  防火墙重载后：同步 UCI + 重建 nft 规则"
+		echo "  status   输出状态，并做自愈与反向同步"
+		echo "  sync     防火墙 → 本页：把实际生效模式写回 natmode.main.mode"
 		exit 1
 		;;
 esac

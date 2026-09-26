@@ -18,7 +18,7 @@
 function parseStatus(text) {
 	var st = { mode: '?', effective: '?', fullcone: '0',
 	           random_rules: '0', srcnat_chains: '0', offload: 'off',
-	           module: '?', synced: '0', healed: '0' };
+	           fw_mode: 'restricted', module: '?', synced: '0', healed: '0' };
 	(text || '').split('\n').forEach(function(line) {
 		var kv = line.split('=');
 		if (kv.length >= 2)
@@ -44,10 +44,26 @@ function offloadLabel(v) {
 	}
 }
 
+// 防火墙页（网络 → 防火墙 → 常规设置）此刻的显示状态。
+// 那个「启用 FullCone NAT」复选框读的就是 firewall.@defaults[0].fullcone，
+// 与本插件同一个 UCI 键 —— 所以本页改动后防火墙页会同步反映。
+//
+// 但要注意：防火墙页只能表达「开 / 关 fullcone」两种状态，
+// 无法表达 NAT4（随机端口）。故 NAT4 与「受限型」在防火墙页看起来一样
+// （都是未勾选），真正的差异只在本页的「随机端口规则」上。
+function fwPageLabel(st) {
+	if (st.fw_mode === 'fullcone')
+		return _('已勾选「启用 FullCone NAT」');
+	if (st.effective === 'symmetric')
+		return _('未勾选（防火墙页无法表达 NAT4，随机端口仅本页可见）');
+	return _('未勾选「启用 FullCone NAT」');
+}
+
 function renderStatus(st) {
 	var rows = [
 		_('当前模式'),        modeLabel(st.effective),
 		_('FullCone 开关'),   (st.fullcone === '1' ? _('已启用') : _('已关闭')),
+		_('防火墙页对应状态'), fwPageLabel(st),
 		_('随机端口规则'),    (st.random_rules !== '0'
 			? _('已注入 ') + st.random_rules + _(' 条') : _('无')),
 		_('srcnat 链'),       st.srcnat_chains + _(' 个'),
