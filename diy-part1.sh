@@ -118,7 +118,9 @@ if [ "$ADD_AIROHA_NPU" = "true" ]; then
   echo "   po/zh_Hans: $(ls -1 "$PODIR/zh_Hans/" 2>/dev/null | tr '\n' ' ')"
 fi
 # --- theme_design ---
-
+if [ "$ADD_PASSWALL" = "true" ]; then
+clone https://github.com/lgs2007m/luci-theme-design "$PKG_DIR/luci-theme-design" openwrt-25.12
+fi
 # --- passwall ---
 if [ "$ADD_PASSWALL" = "true" ]; then
   clone https://github.com/xiaorouji/openwrt-passwall-packages "$PKG_DIR/openwrt-passwall-packages" main
