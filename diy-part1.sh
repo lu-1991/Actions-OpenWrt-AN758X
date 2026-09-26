@@ -118,10 +118,7 @@ if [ "$ADD_AIROHA_NPU" = "true" ]; then
   echo "   po/zh_Hans: $(ls -1 "$PODIR/zh_Hans/" 2>/dev/null | tr '\n' ' ')"
 fi
 # --- theme_design ---
-if [ "$ADD_theme_design" = "true" ]; then
-  sed -i '$a src-git kenzo https://github.com/kenzok8/openwrt-packages' feeds.conf.default
-  sed -i '$a src-git small https://github.com/kenzok8/small' feeds.conf.default
-fi
+
 # --- passwall ---
 if [ "$ADD_PASSWALL" = "true" ]; then
   clone https://github.com/xiaorouji/openwrt-passwall-packages "$PKG_DIR/openwrt-passwall-packages" main
