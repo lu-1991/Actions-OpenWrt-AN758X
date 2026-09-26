@@ -119,7 +119,7 @@ if [ "$ADD_AIROHA_NPU" = "true" ]; then
 fi
 # --- theme_design ---
 if [ "$ADD_theme_design" = "true" ]; then
-clone https://github.com/lgs2007m/luci-theme-design/tree/openwrt-25.12/luci-theme-design "$PKG_DIR/luci-theme-design" openwrt-25.12
+  clone https://github.com/lgs2007m/luci-theme-design "$PKG_DIR/luci-theme-design" openwrt-25.12
 fi
 # --- passwall ---
 if [ "$ADD_PASSWALL" = "true" ]; then
