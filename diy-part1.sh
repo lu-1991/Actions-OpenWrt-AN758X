@@ -24,6 +24,7 @@ mkdir -p "$PKG_DIR"
 ADD_AIROHA_NPU=true    # luci-app-airoha-npu：Airoha SoC 状态页（NPU/CPU/Frame Engine/PPE）
 ADD_FLUENT=true       # luci-theme-fluent：Fluent 2 风格主题
 ADD_FLUENT_LITE=false  # luci-theme-fluent-lite：轻量版（与 fluent 互斥，二选一）
+ADD_Design=true       # luci-theme-Design  Design风格主题
 ADD_FLUENT_DASH=false  # luci-mod-fluentdashboard：可选状态概览卡片
 ADD_PASSWALL=false     # luci-app-passwall（含依赖源）
 ADD_OPENCLASH=false    # luci-app-openclash ⚠ 依赖 Ruby/Rust，编译极慢
@@ -194,6 +195,16 @@ if [ "$ADD_FLUENT" = "true" ] || [ "$ADD_FLUENT_LITE" = "true" ] || [ "$ADD_FLUE
     echo "✅ 已拷贝: $p"
   done
   rm -rf "$FLUENT_TMP"
+fi
+# --- luci-theme-design ---
+# ⚠ 包在仓库的 package/ 子目录下，不能直接 clone 到 package/custom，
+#   必须把子目录拷出来，否则 buildroot 扫不到 Makefile
+if [ "$ADD_Design" = "true" ]; then
+  Design_TMP="$(mktemp -d)/design"
+  clone https://github.com/LazuliKao/luci-theme-design "$Design_TMP" openwrt-25.12
+  rm -rf "$PKG_DIR/luci-app-design"
+  cp -r "$Design_TMP/luci-app-design" "$PKG_DIR/luci-app-design"
+  rm -rf "$Design_TMP"
 fi
 
 if [ "$ADD_EASYTIER" = "true" ]; then
