@@ -8,7 +8,8 @@ env:
   BUILD_ROOT: /workdir
   SOURCE: ${{ github.event.inputs.source || 'fork' }}
   # 唯一真相源：固件版本后缀的作者名（LuCI 概览页「固件版本」）
-  FW_AUTHOR: 'qwe'
+  # 由 fw_author 输入项覆盖，留空则 qwe
+  FW_AUTHOR: ${{ github.event.inputs.fw_author || 'qwe' }}
   REPO_URL: ${{ github.event.inputs.source == 'pbs05/ponwrt' && 'https://github.com/pbs05/ponwrt' || 'https://github.com/qwe3017/ponwrt' }}
   FEEDS_CONF: ''
   DIY_P1_SH: diy-part1.sh
@@ -27,6 +28,35 @@ env:
   IGNORE_CACHE: ${{ github.event.inputs.ignore_cache || 'false' }}
   FW_BUILD_TIME: ''                 # 留空 = 自动取构建时时间（Asia/Shanghai）
   FW_DESC_SUFFIX: ''               # 留空 = "· qwe · <构建时间>"；填了则完全自定义
+
+  # =========================================================
+  # 加密加速开关（★ 本次新增，写在这里才是 workflow 级 env）
+  #
+  # ⚠ 用 github.event.inputs 而不是 inputs：本文件可被 repository_dispatch
+  #   触发，那种触发下 inputs 上下文不可靠，而文件里其余 env 项（SOURCE /
+  #   REPO_URL / BUILD_SCOPE…）统一都用 github.event.inputs，保持一致。
+  #
+  # ⚠ 默认值不能用 "|| " 兜：GitHub 表达式里字符串 '0' 会被转成数字 0 判为假，
+  #   `${{ github.event.inputs.x || '1' }}` 在用户显式选 0 时会错误地返回 '1'。
+  #
+  # ⚠ 也不能用 "!= '0'" 兜：本文件有 repository_dispatch 触发器，那种触发下
+  #   github.event.inputs.* 为 null，null 在字符串比较里被当成空串 ''，
+  #   '' != '0' 成立 → 返回 '1'。也就是说声明的 default: '0' 完全失效，
+  #   repository_dispatch / API 重跑时开关会被静默打开。
+  #   三个开关统一用 "== '1'"：只有显式传 '1' 才开，其余（0 / 空 / null）全关。
+  # =========================================================
+  OPT_CRYPTO_ARM64CE: ${{ github.event.inputs.opt_arm64ce == '1' && '1' || '0' }}
+  OPT_CRYPTO_CHACHA:  ${{ github.event.inputs.opt_chacha  == '1' && '1' || '0' }}
+  OPT_CRYPTO_EIP93:   ${{ github.event.inputs.opt_eip93   == '1' && '1' || '0' }}
+
+  # ---- FTTR 相关仓库 ----
+  # 填 none = 本次不拉这些仓库，FTTR 相关包整体跳过
+  # 两个仓库的可见性不保证一致（当前：luci 公开、后端私有），所以运行时
+  # 逐个匿名探测，只有探测失败的才注入凭证。
+  PRIVATE_REPO: ${{ github.event.inputs.private_repo || 'qwe-qaq/openwrt-fttr' }}
+  PRIVATE_REPO_BRANCH: ${{ github.event.inputs.private_repo_branch || 'main' }}
+  FTTR_LUCI_REPO: ${{ github.event.inputs.fttr_luci_repo || 'qwe-qaq/luci-app-fttr' }}
+  FTTR_LUCI_BRANCH: ${{ github.event.inputs.fttr_luci_branch || 'main' }}
 
 on:
   repository_dispatch:
@@ -71,6 +101,38 @@ on:
           - nokia_xg-040g-mf
           - nokia_xg-040g-mf-ubi
           - all
+
+      # ---------- 加密加速开关 ----------
+      # 用 choice 而不是 boolean：本文件其余开关（scope / ignore_cache /
+      # upload_release / ssh）一律是 choice + 字符串，保持一致；且 boolean
+      # 输入在 API 重跑 / repository_dispatch 时拿不到值，会退化成空串。
+      opt_arm64ce:
+        description: 'arm64 汇编加密实现（AN7581 走 NEON 位切片 / AN7583 走 CE，按 SoC 自动选）'
+        required: false
+        default: '0'
+        type: choice
+        options:
+          - '0'
+          - '1'
+
+      opt_chacha:
+        description: 'ChaCha20-Poly1305 NEON（Xray / sing-box / WireGuard 推荐）。注：机型 configs 里 chacha20 三个包本就默认 =y，此开关主要额外带 gcm/ccm/ctr/xts'
+        required: false
+        default: '0'
+        type: choice
+        options:
+          - '0'
+          - '1'
+
+      opt_eip93:
+        description: 'EIP93 硬件加密引擎（仅大块 IPSec / 大文件 TLS 有收益，小包更慢）'
+        required: false
+        default: '0'
+        type: choice
+        options:
+          - '0'
+          - '1'
+
       scope:
         description: '构建范围 (toolchain-only 仅预热工具链缓存)'
         required: true
@@ -100,6 +162,18 @@ on:
         options:
           - 'true'
           - 'false'
+      private_repo:
+        description: '拉取私有仓库（FTTR 三件套来源，需凭证）'
+        required: false
+        default: 'qwe-qaq/openwrt-fttr'
+        type: choice
+        options:
+          - qwe-qaq/openwrt-fttr
+          - none
+      private_repo_branch:
+        description: '私有仓库分支'
+        required: false
+        default: 'main'
       ssh:
         description: 'SSH connection to Actions (仅 main 分支、仓库所有者可触发)'
         required: false
@@ -121,9 +195,23 @@ jobs:
     # 在 4 核 16G runner 上可能超时，建议拆出 toolchain-only 预热 job。
     timeout-minutes: 350
 
+    # ⚠ secrets 上下文不允许出现在 step 级 if 里（GitHub 的上下文可用性表
+    #   没给 steps.if 这一项，写了会直接报 Unrecognized named-value: 'secrets'）。
+    #   所以在 job 级 env 里把「凭证配了没」算成布尔串，step 里只判断这个标志。
+    #   标志本身是 true/false，不含任何秘密值。
+    env:
+      HAS_APP_CREDS: ${{ secrets.PRIVATE_SOURCE_APP_ID != '' && secrets.PRIVATE_SOURCE_APP_PRIVATE_KEY != '' }}
+      HAS_PAT: ${{ secrets.PRIVATE_REPO_TOKEN != '' || secrets.FTTR_TOKEN != '' }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          # 不持久化凭据：checkout 会把 http.https://github.com/.extraheader
+          # 写进【本地】.git/config，那个头带的是仅本仓库权限的 GITHUB_TOKEN，
+          # 会盖掉凭证步骤注入的 PAT，导致私有仓库 404（本流程无 git push，
+          # 后续只用 gh CLI + env 里的 GITHUB_TOKEN，不需要 git 持久化凭据）
+          persist-credentials: false
 
       # =========================================================
       # 0. 解析机型 -> 自动校正 SoC，导出 device name
@@ -165,6 +253,7 @@ jobs:
           echo "Branch   : ${REPO_BRANCH}"
           echo "Scope    : ${BUILD_SCOPE}"
           echo "Author   : ${FW_AUTHOR}"
+          echo "Crypto   : ARM64CE=${OPT_CRYPTO_ARM64CE} CHACHA=${OPT_CRYPTO_CHACHA} EIP93=${OPT_CRYPTO_EIP93}"
           echo "========================================"
 
       # =========================================================
@@ -231,7 +320,241 @@ jobs:
           # 始终是确定值，而不是空串（空串会让 LuCI 概览页显示 "·  ·"）。
           echo "FW_AUTHOR=${FW_AUTHOR:-qwe}" >> "$GITHUB_ENV"
 
+          # 加密开关同样固化一遍：写进 GITHUB_ENV 后，即便哪天 workflow 级
+          # env 表达式改了，本 job 后续步骤读到的仍是本次解析出的确定值。
+          echo "OPT_CRYPTO_ARM64CE=${OPT_CRYPTO_ARM64CE}" >> "$GITHUB_ENV"
+          echo "OPT_CRYPTO_CHACHA=${OPT_CRYPTO_CHACHA}" >> "$GITHUB_ENV"
+          echo "OPT_CRYPTO_EIP93=${OPT_CRYPTO_EIP93}" >> "$GITHUB_ENV"
+
           cd openwrt && echo "commit: $(git rev-parse --short HEAD)"
+
+      # =========================================================
+      # 2.5 私有仓库凭证（openwrt-fttr feed 的来源）
+      #
+      # 凭证优先级：GitHub App 安装令牌 > Secret 里的 PAT
+      #   App 令牌：1 小时有效、仅限白名单仓库、contents 只读、job 结束自动吊销，
+      #             泄露窗口和权限面都比长期 PAT 小一个量级。
+      #
+      # 注入方式：GIT_ASKPASS（而不是 git insteadOf）
+      #   令牌写进 $RUNNER_TEMP/gh_token（600），git 被要求认证时才由 askpass
+      #   读出来。好处：令牌不进命令行、不写进 ~/.gitconfig、不出现在后续
+      #   步骤的 env 里；diy-part1.sh 的 clone URL 保持裸 URL，一行都不用改。
+      #   ⚠ 别再拼 user:token@ 或写 url.*.insteadOf —— 那会落盘到 git config，
+      #     还会和 checkout 注入的 extraheader 抢优先级（后者写本地 .git/config，
+      #     本地优先级更高，会直接盖掉令牌 → 404 Repository not found）。
+      #
+      # PAT 回退：secrets.PRIVATE_REPO_TOKEN > secrets.FTTR_TOKEN（旧名兼容）
+      # ⚠ workflow_dispatch 的输入值会明文出现在 run 页面、也能被 API 读到，
+      #   所以不设令牌输入框，长期凭证只放 Secret。
+      # =========================================================
+
+      # ---------------------------------------------------------
+      # 先探测、后取凭证：公开仓库零凭证直接 clone，只有私有仓库才去申请
+      # GitHub App 令牌。好处有三：
+      #   1) 仓库哪天转公开，不用改任何配置自动生效；
+      #   2) 没装 App 的 fork 在「后端仓库是公开」的情况下照样能跑；
+      #   3) 令牌只在真正需要时才存在，暴露面最小。
+      # 探测必须真匿名：此时 GIT_ASKPASS 尚未设置，且 checkout 已用
+      # persist-credentials: false，git 里没有本仓库的 GITHUB_TOKEN 头。
+      # ---------------------------------------------------------
+      - name: Probe FTTR repos visibility
+        id: probe
+        if: ${{ env.PRIVATE_REPO != 'none' && (env.PROFILE == 'h3c_hm2004-du' || github.event.inputs.profile == 'h3c_hm2004-du') }}
+        run: |
+          NEED=false
+          # 状态词走 stdout 给调用方捕获，人读的提示走 stderr（否则会被 $( ) 吃掉）
+          probe() {  # probe <owner/repo> <branch> → stdout: public|private
+            local repo="$1" br="$2"
+            if git ls-remote --exit-code --heads "https://github.com/${repo}" \
+                 "refs/heads/${br}" >/dev/null 2>&1; then
+              echo "  ✅ ${repo} (分支 ${br}) —— 公开，匿名可读，不需要凭证" >&2
+              echo "public"
+            else
+              echo "  🔒 ${repo} (分支 ${br}) —— 匿名不可读，需要凭证" >&2
+              echo "private"
+            fi
+          }
+
+          echo "=== FTTR 仓库可见性探测（匿名）==="
+          R1=$(probe "${PRIVATE_REPO}" "${PRIVATE_REPO_BRANCH}")
+          R2=$(probe "${FTTR_LUCI_REPO}" "${FTTR_LUCI_BRANCH}")
+
+          if [ "$R1" = "private" ] || [ "$R2" = "private" ]; then
+            NEED=true
+          fi
+          echo "need_token=$NEED" >> "$GITHUB_OUTPUT"
+          echo "backend=$R1" >> "$GITHUB_OUTPUT"
+          echo "luci=$R2" >> "$GITHUB_OUTPUT"
+
+          # 只把「私有」的仓库放进令牌白名单。
+          # ⚠ 踩过的坑：repositories 里写了一个 App 没安装的仓库（哪怕是公开仓库），
+          #   令牌申请直接 422 —— "at least one repository that does not exist or
+          #   is not accessible to the parent installation"。公开仓库本来就不需要
+          #   令牌，列进去纯属给自己找麻烦。
+          TOKEN_REPOS=""
+          add_repo() {  # add_repo <public|private> <owner/repo>
+            [ "$1" = "private" ] || return 0
+            local name="${2#*/}"   # 去掉 owner/ 前缀，只留仓库名
+            if [ -z "$TOKEN_REPOS" ]; then TOKEN_REPOS="$name"; else TOKEN_REPOS="$TOKEN_REPOS,$name"; fi
+          }
+          add_repo "$R1" "${PRIVATE_REPO}"
+          add_repo "$R2" "${FTTR_LUCI_REPO}"
+          echo "token_repos=$TOKEN_REPOS" >> "$GITHUB_OUTPUT"
+          echo "  令牌白名单（仅私有仓库）：${TOKEN_REPOS:-（空）}"
+          echo "结论：$( [ "$NEED" = true ] && echo '至少一个需要凭证 → 申请 App 令牌' || echo '全部公开 → 跳过取凭证' )"
+          echo "--- 凭证配置情况（只看有没有配，不打印值）---"
+          echo "  App 凭证 (PRIVATE_SOURCE_APP_ID + _PRIVATE_KEY): ${HAS_APP_CREDS}"
+          echo "  PAT 回退 (PRIVATE_REPO_TOKEN / FTTR_TOKEN):      ${HAS_PAT}"
+          if [ "$NEED" = true ] && [ "${HAS_APP_CREDS}" != "true" ] && [ "${HAS_PAT}" != "true" ]; then
+            echo "::error::仓库需要凭证但两种凭证都没配 —— 后面的 Setup 步骤会失败退出"
+          fi
+
+      # 只在探测到「确实有私有仓库」时才申请令牌：PRIVATE_REPO=none、
+      # 非 HM2004-DU 机型、或仓库已转公开，都直接跳过，免得没装 App 的
+      # fork 一上来就红。
+      - name: Create private source token
+        id: private-source-token
+        # 少了 HAS_APP_CREDS 这个门，Secrets 没配时 action 会直接抛
+        # "Input required and not supplied: app-id" 炸掉整个 job。
+        # 加上之后：没配 App 就跳过，由后面的 Setup 步骤回退到 PAT。
+        if: ${{ steps.probe.outputs.need_token == 'true' && env.HAS_APP_CREDS == 'true' }}
+        # ⚠ 关键：拿不到令牌不能炸掉整个 job。
+        #   典型场景——仓库私有但 App 没装到它（或 repositories 里混进了
+        #   公开但未安装的仓库）→ action 报 422，重试 4 次后失败。
+        #   设了 continue-on-error 之后，Setup 步骤会看到空的 APP_TOKEN
+        #   并自动回退到 PAT，构建不至于卡死在编译前。
+        continue-on-error: true
+        uses: actions/create-github-app-token@v1
+        with:
+          # v1 用 app-id（App 的「App ID」）；升到 v3 要改名为 client-id 并且
+          # 填的是「Client ID」，两者不是同一个值，别直接换版本号了事。
+          app-id: ${{ secrets.PRIVATE_SOURCE_APP_ID }}
+          private-key: ${{ secrets.PRIVATE_SOURCE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: read
+          # 只列探测判定为私有的仓库（逗号分隔），公开仓库不进白名单
+          repositories: ${{ steps.probe.outputs.token_repos }}
+
+      - name: Prepare private Git authentication
+        if: ${{ steps.probe.outputs.need_token == 'true' && (env.HAS_APP_CREDS == 'true' || env.HAS_PAT == 'true') }}
+        run: |
+          install -m 700 "$GITHUB_WORKSPACE/scripts/git_askpass.sh" "$RUNNER_TEMP/git-askpass"
+          echo "GIT_ASKPASS=$RUNNER_TEMP/git-askpass" >> "$GITHUB_ENV"
+          echo "GIT_TERMINAL_PROMPT=0" >> "$GITHUB_ENV"
+
+      - name: Setup private repo credentials
+        id: private_repo
+        env:
+          APP_TOKEN: ${{ steps.private-source-token.outputs.token }}
+          SEC_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          SEC_TOKEN_LEGACY: ${{ secrets.FTTR_TOKEN }}
+        run: |
+          # 本次不拉私有仓库：关掉 FTTR 全家桶（开关支持环境变量覆盖）
+          if [ "${PRIVATE_REPO}" = "none" ]; then
+            echo "ADD_FTTR=false" >> "$GITHUB_ENV"
+            echo "⚠ PRIVATE_REPO=none —— 跳过私有仓库，kmod-h3c-fmcs / h3c-fttr-tools / h3c-fmcs-firmware / luci-app-fttr 都不会编进固件"
+            exit 0
+          fi
+
+          # 只有 HM2004-DU 会拉私库（diy-part1.sh 的 FTTR_PROFILE 判定）
+          if [ "${PROFILE}" != "h3c_hm2004-du" ]; then
+            echo "ℹ PROFILE=${PROFILE} —— 不涉及 FTTR 私库，跳过凭证注入"
+            exit 0
+          fi
+
+          # 探测已认定两个仓库都能匿名读 → 一个凭证都不注入
+          if [ "${{ steps.probe.outputs.need_token }}" != "true" ]; then
+            echo "✅ 探测结论：${PRIVATE_REPO} / ${FTTR_LUCI_REPO} 均可匿名访问（公开仓库），不注入任何凭证"
+            exit 0
+          fi
+
+          # 日志脱敏：URL 里的 user:token@ 一律替换成 ***@
+          sanitize() { sed -E 's#://[^@/]+@#://***@#g'; }
+
+          # 1) 选凭证：App 安装令牌 > PAT Secret
+          if [ -n "${APP_TOKEN}" ]; then
+            TOKEN="${APP_TOKEN}"; SRC="GitHub App 安装令牌"
+          elif [ "${HAS_APP_CREDS}" = "true" ] && [ "${{ steps.probe.outputs.need_token }}" = "true" ]; then
+            echo "::warning::App 凭证已配置，但令牌申请失败（见上一步日志）。"
+            echo "  最常见原因：App 的 Install App → Only select repositories 里没勾上探测判定为私有的仓库，"
+            echo "  或 repositories 白名单混进了未安装的仓库（HTTP 422）。回退到 PAT。"
+          elif [ -n "${SEC_TOKEN}" ]; then
+            TOKEN="${SEC_TOKEN}"; SRC="Secret PRIVATE_REPO_TOKEN"
+          elif [ -n "${SEC_TOKEN_LEGACY}" ]; then
+            TOKEN="${SEC_TOKEN_LEGACY}"; SRC="Secret FTTR_TOKEN（旧名）"
+          else
+            echo "::error::探测到私有仓库，但没有任何可用凭证（GitHub App / PRIVATE_REPO_TOKEN / FTTR_TOKEN 全空）。"
+            echo "  推荐：Secrets 配 PRIVATE_SOURCE_APP_ID + PRIVATE_SOURCE_APP_PRIVATE_KEY"
+            echo "        （GitHub App 装到下面标为 private 的仓库，Permissions → Contents: Read-only）"
+            echo "  回退：Secrets 配 PRIVATE_REPO_TOKEN（PAT，需对私有仓库有 Contents 读权限）"
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "ℹ 凭证来源：$SRC"
+
+          # 令牌落到一个 600 的文件里给 askpass 读：不进 git config、不进命令行
+          TOKEN_FILE="$RUNNER_TEMP/gh_token"
+          printf '%s' "$TOKEN" > "$TOKEN_FILE"
+          chmod 600 "$TOKEN_FILE"
+
+          # ⚠ 写 $GITHUB_ENV 只对【后续步骤】生效，本步骤当前进程看不见！
+          #   下面紧跟的带凭证复检就在本步骤里跑，所以必须同时 export 一份，
+          #   否则 askpass 拿到空的 GH_TOKEN_FILE，报
+          #   "unable to read askpass response ... terminal prompts disabled"。
+          #   GIT_ASKPASS 是上一步写进 GITHUB_ENV 的，本步骤已经能读到。
+          export GH_TOKEN_FILE="$TOKEN_FILE"
+          export GIT_ASKPASS="${GIT_ASKPASS:-$RUNNER_TEMP/git-askpass}"
+          echo "GH_TOKEN_FILE=$TOKEN_FILE" >> "$GITHUB_ENV"
+
+          # 自检：直接问一次 askpass，拿不到令牌就别往下跑（省得git 报黑盒错误）
+          if ! ASK=$(GIT_ASKPASS="$GIT_ASKPASS" "$GIT_ASKPASS" "Password for 'https://github.com':" 2>/dev/null) \
+               || [ -z "$ASK" ]; then
+            echo "::error::askpass 自检失败：拿不到令牌（令牌文件为空？askpass 脚本没可执行位？）"
+            exit 1
+          fi
+          echo "  askpass 自检通过（令牌长度 ${#ASK}，值不打印）"
+
+          # checkout 注入的 extraheader 会直接盖掉 askpass 的凭证（本地 config 优先级最高）。
+          # persist-credentials: false 已让 checkout 不再写入，这里双保险清一下。
+          git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          git config --local  --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+
+          # 3) 带凭证复检：只复检「探测判定为私有」的仓库，公开的不碰
+          #    （公开仓库带令牌也能过，但没必要，且会掩盖配置问题）
+          FAIL=0
+          for pair in "${{ steps.probe.outputs.backend }}:${PRIVATE_REPO}:${PRIVATE_REPO_BRANCH}" \
+                      "${{ steps.probe.outputs.luci }}:${FTTR_LUCI_REPO}:${FTTR_LUCI_BRANCH}"; do
+            vis="${pair%%:*}";     rest="${pair#*:}"
+            repo="${rest%%:*}";    br="${rest#*:}"
+            [ "$vis" = "private" ] || continue
+
+            if ERR=$(git ls-remote --exit-code --heads "https://github.com/${repo}" \
+                       "refs/heads/${br}" 2>&1); then
+              echo "✅ 凭证可用：${repo} (分支 ${br})"
+              continue
+            fi
+
+            FAIL=1
+            echo "::error::仓库 ${repo} 的分支 ${br} 带凭证访问失败"
+            echo "--- git 原始错误（已脱敏）---"
+            printf '%s\n' "$ERR" | sanitize
+
+            # 4) 用 API 把失败原因分开报（App 令牌和 PAT 的排查路径完全不同）
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+                     -H "Authorization: Bearer $TOKEN" \
+                     -H "Accept: application/vnd.github+json" \
+                     "https://api.github.com/repos/${repo}")
+            echo "--- API /repos/${repo} → HTTP $CODE ---"
+            case "$CODE" in
+              200) echo "ℹ API 可见但 git 取不到：多半是分支 ${br} 不存在（注意大小写）" ;;
+              404) echo "ℹ 404：App 没安装到 ${repo}（App → Install App → Only select repositories 里要有它），或上一步 repositories 白名单漏了；走 PAT 则是 Repository access 没选中该仓库 / 只勾了默认的 Metadata（读不了 git）" ;;
+              401) echo "ℹ 401：令牌无效或已过期（App 安装令牌只有 1 小时、不跨 job 复用），或私钥与 App ID 不匹配" ;;
+              403) echo "ℹ 403：权限不足或限流，确认 App 的 Contents 权限至少是 Read-only" ;;
+              *)   echo "ℹ HTTP $CODE：见上方 git 原始错误" ;;
+            esac
+          done
+
+          exit "$FAIL"
 
       # =========================================================
       # 3. dl 下载缓存
@@ -334,6 +657,9 @@ jobs:
 
       # =========================================================
       # 8. diy-part2.sh —— 时区改为中国、写入固件版本后缀
+      #     ★ 加密可选包就在这一步注入（diy-part2.sh 末尾 source 我们的脚本）。
+      #       必须早于步骤 9 的 make defconfig，否则内核符号写完就被
+      #       defconfig 重新展开覆盖掉了。
       # =========================================================
       - name: Set timezone to China (diy-part2.sh)
         run: |
@@ -343,6 +669,12 @@ jobs:
           WIFI_5G_COUNTRY="$WIFI_5G_COUNTRY" WIFI_5G_CHANNEL="$WIFI_5G_CHANNEL" \
           WIFI_5G_HTMODE="$WIFI_5G_HTMODE" WIFI_5G_FALLBACK="$WIFI_5G_FALLBACK" \
             "$GITHUB_WORKSPACE/$DIY_P2_SH"
+
+          # 可选包是否被 defconfig 接受，要等步骤 9 之后才知道；
+          # 这里先记下期望值，步骤 9 末尾做一次对照。
+          echo "WANT_ARM64CE=${OPT_CRYPTO_ARM64CE}" >> "$GITHUB_ENV"
+          echo "WANT_CHACHA=${OPT_CRYPTO_CHACHA}"   >> "$GITHUB_ENV"
+          echo "WANT_EIP93=${OPT_CRYPTO_EIP93}"     >> "$GITHUB_ENV"
 
       # =========================================================
       # 9. defconfig + 生成工具链缓存 Key + 校验机型
@@ -403,6 +735,36 @@ jobs:
           # 中文包（po 注入后才存在，缺失只警告不阻断）
           if ! grep -q "^CONFIG_PACKAGE_luci-i18n-airoha-npu-zh-cn=y" .config; then
             echo "::warning::luci-i18n-airoha-npu-zh-cn 未启用（po/zh_Hans 未注入？界面将为英文）"
+          fi
+
+          # =========================================================
+          # 加密可选包复核（只警告不阻断）
+          #   defconfig 会把源码树里不存在的包当无效符号静默删掉。
+          #   PonWrt 基于 ImmortalWrt，kmod-crypto-hw-eip93 是否随
+          #   target/linux 的 crypto.mk 一起带过来取决于内核版本：
+          #   ≥6.18 走主线 inside-secure/eip93，<6.18 走 mtk-eip93，
+          #   两种都没有就整个包不存在。这里如实报，别让"编译成功"骗过去。
+          # =========================================================
+          echo "===== 加密可选包复核 ====="
+          if [ "${WANT_EIP93}" = "1" ] && ! grep -q "^CONFIG_PACKAGE_kmod-crypto-hw-eip93=y" .config; then
+            echo "::warning::kmod-crypto-hw-eip93 未编入 —— 当前源码树不带该包（内核版本或 target 不含 EIP93）。不影响其余构建。"
+          fi
+          if [ "${WANT_CHACHA}" = "1" ]; then
+            for p in kmod-crypto-lib-chacha20 kmod-crypto-chacha20poly1305; do
+              grep -q "^CONFIG_PACKAGE_${p}=y" .config \
+                && echo "  ✅ ${p}" \
+                || echo "::warning::${p} 未编入（源码树无此包符号，ChaCha 加速不生效）"
+            done
+          fi
+
+          # 内核符号复核：目标 kernel config 里应能看到我们写进去的项
+          KCFG="$(ls target/linux/airoha/${SUBTARGET:-${SOC}}/config-* 2>/dev/null | head -1)"
+          if [ "${WANT_ARM64CE}" = "1" ] && [ -n "$KCFG" ]; then
+            if grep -q '^CONFIG_CRYPTO_AES_ARM64=y' "$KCFG"; then
+              echo "  ✅ 内核符号已写入 ${KCFG}"
+            else
+              echo "::warning::${KCFG} 里没有 CONFIG_CRYPTO_AES_ARM64 —— diy-part2-crypto.sh 未生效（没被 source？路径不对？）"
+            fi
           fi
 
           # 机型校验: 机型名写错时直接失败，避免静默全编译
@@ -661,11 +1023,13 @@ jobs:
       # =========================================================
       - name: SSH connection to Actions
         uses: mxschmitt/action-tmate@v3
+        # 原条件 contains(github.event.action, 'ssh') 对 workflow_dispatch 永假
+        # （event.action 恒为 "workflow_dispatch"），叠加 ref==refs/heads/main
+        # （本 workflow 在 FTTR 分支运行）后，ssh=true 从来不会触发。
+        # 保留 owner 校验：调试入口只对仓库所有者开放。
         if: >-
-          (github.event.inputs.ssh == 'true' && github.event.inputs.ssh != 'false')
-          && github.ref == 'refs/heads/main'
+          github.event.inputs.ssh == 'true'
           && github.actor == github.repository_owner
-          && contains(github.event.action, 'ssh')
 
       # =========================================================
       # 17. 下载软件包（defconfig 已在步骤 9 执行，此处不再重复）
@@ -788,6 +1152,7 @@ jobs:
             echo "| 分支 | \`${REPO_BRANCH}\` |"
             echo "| 提交 | \`$(cd "$BUILD_ROOT"/openwrt && git rev-parse --short HEAD)\` |"
             echo "| 编译时间 | $(date '+%Y-%m-%d %H:%M:%S') (Shanghai) |"
+            echo "| 加密加速 | ARM64CE=${OPT_CRYPTO_ARM64CE} / ChaCha=${OPT_CRYPTO_CHACHA} / EIP93=${OPT_CRYPTO_EIP93} |"
             echo ""
             echo "### 固件文件校验"
             echo '```'
